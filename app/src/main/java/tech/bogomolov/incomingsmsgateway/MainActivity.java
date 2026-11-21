@@ -8,11 +8,13 @@ import android.content.pm.PackageManager;
 import android.database.DataSetObserver;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.InputType;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.EditText;
 import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -184,25 +186,43 @@ public class MainActivity extends AppCompatActivity {
         return super.onOptionsItemSelected(item);
     }
 
-    // Shows the office chooser. Picking an office creates/overwrites the single
-    // forwarding rule that routes every SMS to that office's server URL.
+    // Шаг 1: выбор офиса. После выбора — спрашиваем номер этого телефона.
     private void showOfficePicker() {
         int current = Offices.getSelectedIndex(this);
         final int[] choice = { current };
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("Выберите офис");
         builder.setSingleChoiceItems(Offices.NAMES, current, (d, which) -> choice[0] = which);
-        builder.setPositiveButton("ОК", (d, w) -> {
+        builder.setPositiveButton("Далее", (d, w) -> {
             if (choice[0] >= 0) {
-                Offices.apply(this, choice[0]);
-                if (listAdapter != null) {
-                    listAdapter.clear();
-                    listAdapter.addAll(ForwardingConfig.getAll(this));
-                }
-                Toast.makeText(this,
-                        "Этот телефон теперь работает как «" + Offices.NAMES[choice[0]] + "»",
-                        Toast.LENGTH_LONG).show();
+                askPhoneNumber(choice[0]);
             }
+        });
+        builder.setNegativeButton("Отмена", null);
+        builder.show();
+    }
+
+    // Шаг 2: номер этого телефона (виден в /status). Применяем офис + номер.
+    private void askPhoneNumber(int officeIndex) {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_PHONE);
+        input.setHint("+7...");
+        input.setText(Offices.getPhoneLabel(this));
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Номер этого телефона");
+        builder.setMessage("Введите номер этой SIM — он будет виден в статусе телефонов.");
+        builder.setView(input);
+        builder.setPositiveButton("Готово", (d, w) -> {
+            String label = input.getText().toString().trim();
+            Offices.apply(this, officeIndex, label);
+            if (listAdapter != null) {
+                listAdapter.clear();
+                listAdapter.addAll(ForwardingConfig.getAll(this));
+            }
+            Toast.makeText(this,
+                    "Этот телефон: " + Offices.NAMES[officeIndex]
+                            + (label.isEmpty() ? "" : ", " + label),
+                    Toast.LENGTH_LONG).show();
         });
         builder.setNegativeButton("Отмена", null);
         builder.show();
@@ -233,7 +253,7 @@ public class MainActivity extends AppCompatActivity {
             this.startService();
         }
 
-        // First run: no office chosen yet -> open the chooser so setup is one tap.
+        // Первый запуск: офис не выбран -> открываем выбор офиса сразу.
         if (Offices.getSelectedIndex(context) == -1) {
             showOfficePicker();
         }
