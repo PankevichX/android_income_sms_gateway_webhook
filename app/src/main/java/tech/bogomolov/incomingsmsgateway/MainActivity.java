@@ -47,10 +47,6 @@ public class MainActivity extends AppCompatActivity {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.RECEIVE_SMS);
         }
-        // Android 13+ gates the foreground-service "F" indicator behind a runtime
-        // permission. Without it the service still runs and forwards SMS, but the
-        // persistent notification never shows (issue #77). Treated as best-effort:
-        // we ask for it, but its denial does not block the app like RECEIVE_SMS does.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS);
@@ -82,10 +78,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // RECEIVE_SMS wasn't part of this result (it was already granted, and only
-        // the best-effort POST_NOTIFICATIONS was requested), so proceed as long as
-        // RECEIVE_SMS is in fact still granted. Re-checking also handles the
-        // empty-array case Android delivers when the dialog is cancelled.
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS)
                 == PackageManager.PERMISSION_GRANTED) {
             showList();
@@ -95,11 +87,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Failures accrue in the background, so refresh the retry counter each
-        // time the activity comes forward.
         invalidateOptionsMenu();
-        // Rules can also change outside this screen (Settings -> import a backup),
-        // so reload the list. Null until the permission flow has let showList() run.
         if (listAdapter != null) {
             listAdapter.clear();
             listAdapter.addAll(ForwardingConfig.getAll(this));
@@ -126,6 +114,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         int id = item.getItemId();
+
+        if (id == R.id.action_bar_select_office) {
+            showOfficePicker();
+            return true;
+        }
 
         if (id == R.id.action_bar_settings) {
             startActivity(new Intent(this, SettingsActivity.class));
@@ -191,20 +184,41 @@ public class MainActivity extends AppCompatActivity {
         return super.onOptionsItemSelected(item);
     }
 
+    // Shows the office chooser. Picking an office creates/overwrites the single
+    // forwarding rule that routes every SMS to that office's server URL.
+    private void showOfficePicker() {
+        int current = Offices.getSelectedIndex(this);
+        final int[] choice = { current };
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Выберите офис");
+        builder.setSingleChoiceItems(Offices.NAMES, current, (d, which) -> choice[0] = which);
+        builder.setPositiveButton("ОК", (d, w) -> {
+            if (choice[0] >= 0) {
+                Offices.apply(this, choice[0]);
+                if (listAdapter != null) {
+                    listAdapter.clear();
+                    listAdapter.addAll(ForwardingConfig.getAll(this));
+                }
+                Toast.makeText(this,
+                        "Этот телефон теперь работает как «" + Offices.NAMES[choice[0]] + "»",
+                        Toast.LENGTH_LONG).show();
+            }
+        });
+        builder.setNegativeButton("Отмена", null);
+        builder.show();
+    }
+
     private void showList() {
         context = this;
         ListView listview = findViewById(R.id.listView);
 
         ArrayList<ForwardingConfig> configs = ForwardingConfig.getAll(context);
 
-        // First-run / empty state: point the user at the + button instead of
-        // leaving a blank screen.
         showInfo(configs.isEmpty() ? getString(R.string.empty_list_hint) : "");
 
         listAdapter = new ListAdapter(configs, context);
         listview.setAdapter(listAdapter);
 
-        // Keep the empty-state hint in sync as rules are added or deleted.
         listAdapter.registerDataSetObserver(new DataSetObserver() {
             @Override
             public void onChanged() {
@@ -217,6 +231,11 @@ public class MainActivity extends AppCompatActivity {
 
         if (!this.isServiceRunning()) {
             this.startService();
+        }
+
+        // First run: no office chosen yet -> open the chooser so setup is one tap.
+        if (Offices.getSelectedIndex(context) == -1) {
+            showOfficePicker();
         }
     }
 
@@ -244,7 +263,6 @@ public class MainActivity extends AppCompatActivity {
     private void showInfo(String text) {
         TextView notice = findViewById(R.id.info_notice);
         notice.setText(text);
-        // The icon above the notice should disappear together with the text.
         findViewById(R.id.empty_state).setVisibility(
                 text.isEmpty() ? View.GONE : View.VISIBLE);
     }
