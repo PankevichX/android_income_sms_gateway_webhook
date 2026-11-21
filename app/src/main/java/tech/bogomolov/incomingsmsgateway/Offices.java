@@ -23,13 +23,11 @@ public class Offices {
     };
 
     // Ключ src=... для каждого офиса, В ТОМ ЖЕ ПОРЯДКЕ, что и NAMES выше.
-    // Для офисов 2-4 замени заглушки PUT_..._HERE на ключи, которые выдаст бот
-    // (/addsource Офис 2, /addsource Офис 3, /addsource Офис 4).
     public static final String[] KEYS = {
             "WkRlkSgwN6hMzTvMJy59SA",   // Офис 1
-            "PUT_OFFICE2_KEY_HERE",     // Офис 2
-            "PUT_OFFICE3_KEY_HERE",     // Офис 3
-            "PUT_OFFICE4_KEY_HERE",     // Офис 4
+            "-s7tZJ5qdFZfp3b1YLXkVw",   // Офис 2
+            "q7Sbup9IL2HKyygqmbz3Dg",   // Офис 3
+            "OM6ba04CUTDAJgmJRI91JQ",   // Офис 4
     };
 
     // Тело запроса, которое уходит на сервер по каждой SMS.
