@@ -6,8 +6,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.DataSetObserver;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Menu;
@@ -223,9 +226,37 @@ public class MainActivity extends AppCompatActivity {
                     "Этот телефон: " + Offices.NAMES[officeIndex]
                             + (label.isEmpty() ? "" : ", " + label),
                     Toast.LENGTH_LONG).show();
+            // После настройки — просим разрешение не уходить в сон (без ограничений батареи).
+            requestIgnoreBatteryOptimizations();
         });
         builder.setNegativeButton("Отмена", null);
         builder.show();
+    }
+
+    // Показывает системный запрос "работать без ограничений батареи" (отключить Doze),
+    // чтобы телефон не усыплял приложение и SMS пересылались сразу, а не пачкой при
+    // разблокировке. Если разрешение уже выдано — ничего не делает.
+    private void requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        String pkg = getPackageName();
+        if (pm != null && pm.isIgnoringBatteryOptimizations(pkg)) {
+            return;  // уже разрешено
+        }
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + pkg));
+            startActivity(intent);
+        } catch (Exception e) {
+            // На некоторых прошивках прямой запрос недоступен — открываем общий список.
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception ignored) {
+                Log.e("SmsGateway", "battery opt request failed: " + e);
+            }
+        }
     }
 
     private void showList() {
