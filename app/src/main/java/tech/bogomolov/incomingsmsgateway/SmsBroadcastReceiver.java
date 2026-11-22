@@ -4,12 +4,14 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.telephony.SmsMessage;
 import android.util.Log;
 
 import androidx.work.Data;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -17,6 +19,24 @@ import java.util.regex.PatternSyntaxException;
 public class SmsBroadcastReceiver extends BroadcastReceiver {
 
     private Context context;
+
+    // Одна совпавшая пересылка, чтобы отправить её вне главного потока.
+    private static class Delivery {
+        final ForwardingConfig config;
+        final String sender;
+        final String slotName;
+        final String content;
+        final long timeStamp;
+
+        Delivery(ForwardingConfig config, String sender, String slotName,
+                 String content, long timeStamp) {
+            this.config = config;
+            this.sender = sender;
+            this.slotName = slotName;
+            this.content = content;
+            this.timeStamp = timeStamp;
+        }
+    }
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -47,6 +67,8 @@ public class SmsBroadcastReceiver extends BroadcastReceiver {
             return;
         }
 
+        List<Delivery> deliveries = new ArrayList<>();
+
         for (ForwardingConfig config : configs) {
             if (!matchesSender(config, sender, asterisk)) {
                 continue;
@@ -74,15 +96,84 @@ public class SmsBroadcastReceiver extends BroadcastReceiver {
                 slotName = "sim" + slotId;
             }
 
-            this.callWebHook(config, sender, slotName, content.toString(), messages[0].getTimestampMillis());
+            deliveries.add(new Delivery(config, sender, slotName, content.toString(),
+                    messages[0].getTimestampMillis()));
         }
+
+        if (deliveries.isEmpty()) {
+            return;
+        }
+
+        // Приход SMS коротко будит телефон из Doze. Мы используем это окно, чтобы
+        // отправить СРАЗУ, а не класть в очередь (которую Doze отложил бы). goAsync()
+        // держит ресивер живым, пока фоновый поток делает сетевой запрос, а короткий
+        // wakelock не даёт CPU заснуть до завершения отправки. Если отправить не
+        // вышло — откатываемся в обычную очередь с повторами.
+        final PendingResult pendingResult = goAsync();
+        final Context appContext = context.getApplicationContext();
+
+        PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+        final PowerManager.WakeLock wakeLock = (pm == null) ? null : pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK, "SmsForwarder:send");
+        if (wakeLock != null) {
+            try {
+                wakeLock.acquire(55_000L);  // страховочный таймаут
+            } catch (Exception ignored) {
+            }
+        }
+
+        new Thread(() -> {
+            try {
+                for (Delivery d : deliveries) {
+                    deliverNow(appContext, d);
+                }
+            } catch (Throwable t) {
+                Log.e("SmsBroadcastReceiver", "immediate send error: " + t);
+            } finally {
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    try {
+                        wakeLock.release();
+                    } catch (Exception ignored) {
+                    }
+                }
+                try {
+                    pendingResult.finish();
+                } catch (Exception ignored) {
+                }
+            }
+        }).start();
     }
 
-    protected void callWebHook(ForwardingConfig config, String sender, String slotName,
-                               String content, long timeStamp) {
+    // Пытается доставить прямо сейчас, в окне пробуждения от SMS. При любой неудаче
+    // (не 2xx, сетевая ошибка, исключение) откатывается в очередь WorkManager, чтобы
+    // существующая логика повторов / backoff / "сохранять неудавшиеся" продолжала
+    // работать как раньше.
+    private void deliverNow(Context appContext, Delivery d) {
+        ForwardingConfig config = d.config;
+        String message = config.prepareMessage(d.sender, d.content, d.slotName, d.timeStamp);
 
-        String message = config.prepareMessage(sender, content, slotName, timeStamp);
+        boolean sentOk = false;
+        try {
+            Request request = new Request(config.getUrl(), message);
+            request.setJsonHeaders(config.getHeaders());
+            if (config.getSignHmacSha256()
+                    && config.getSignHmacSha256Secret() != null
+                    && !config.getSignHmacSha256Secret().isEmpty()) {
+                request.setSignatureHeader(config.getSignHmacSha256Secret(), message);
+            }
+            request.setIgnoreSsl(config.getIgnoreSsl());
+            request.setUseChunkedMode(config.getChunkedMode());
+            String result = request.execute();
+            sentOk = Request.RESULT_SUCCESS.equals(result);
+        } catch (Throwable t) {
+            Log.e("SmsBroadcastReceiver", "direct send failed: " + t);
+        }
 
+        if (sentOk) {
+            return;
+        }
+
+        // Откат: обычная очередь с повторами.
         Data data = new Data.Builder()
                 .putString(RequestWorker.DATA_URL, config.getUrl())
                 .putString(RequestWorker.DATA_TEXT, message)
@@ -96,17 +187,11 @@ public class SmsBroadcastReceiver extends BroadcastReceiver {
                 .putBoolean(RequestWorker.DATA_LOCAL_MODE, config.getLocalMode())
                 .build();
 
-        RequestWorker.enqueue(this.context, data);
+        RequestWorker.enqueue(appContext, data);
     }
 
     // Per-config sender match. The asterisk wildcard always means "any sender"
-    // regardless of the regex flag. When the rule opts into regex matching (issue
-    // #88 — e.g. an Indian sender ID like AB-CTAXKR whose operator prefix rotates),
-    // the configured sender is a Java regex tested against the incoming address with
-    // find() (substring), mirroring the content filter. Unlike the content filter
-    // this fails *closed*: an invalid pattern matches nothing, so a typo cannot leak
-    // unrelated senders to the endpoint. The default (flag off) is the historic
-    // exact String.equals match, so every existing stored rule is unchanged.
+    // regardless of the regex flag.
     static boolean matchesSender(ForwardingConfig config, String sender, String asterisk) {
         String configured = config.getSender();
         if (configured.equals(asterisk)) {
@@ -124,14 +209,7 @@ public class SmsBroadcastReceiver extends BroadcastReceiver {
         return sender.equals(configured);
     }
 
-    // Per-config content filter (issue #52). An empty filter forwards every
-    // message (the historic behaviour). A non-empty filter is a Java regex tested
-    // against the SMS body with find() (substring match): the message is forwarded
-    // only when the regex matches. The single regex covers both directions —
-    // "OTP" forwards messages that contain OTP, while a negative-lookahead such as
-    // "(?s)^(?!.*OTP)" forwards every message that does NOT contain it. An invalid
-    // pattern fails open (forwards and logs) so a typo never silently drops SMS,
-    // mirroring the "never crash forwarding" rule used by the %Regex% placeholder.
+    // Per-config content filter. An empty filter forwards every message.
     static boolean matchesFilter(String filter, String content) {
         if (filter == null || filter.isEmpty()) {
             return true;
